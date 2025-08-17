@@ -61,27 +61,39 @@ const userHeaders = (accessToken) => ({ Authorization: `Bearer ${accessToken}` }
 app.get("/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // Verify auth from frontend
+// Verify auth from frontend
 app.post("/auth/verify", async (req, res) => {
   try {
     const { accessToken, user } = req.body || {};
-    if (!accessToken) return res.status(400).json({ success: false, message: "Missing accessToken" });
+    if (!accessToken) {
+      return res.status(400).json({ success: false, message: "Missing accessToken" });
+    }
 
-    const me = await axios.get(`${PI_API_BASE}/me`, { headers: userHeaders(accessToken) })
-                          .then(r => r.data);
+    // Verify user from Pi API
+    const me = await axios
+      .get(`${PI_API_BASE}/me`, { headers: userHeaders(accessToken) })
+      .then(r => r.data);
 
     const uid = String(me?.uid || user?.uid || "");
     const username = user?.username || me?.username || "Pioneer";
 
-    if (!uid) return res.status(401).json({ success: false, message: "Invalid token/user" });
+    if (!uid) {
+      return res.status(401).json({ success: false, message: "Invalid token/user" });
+    }
 
-    // Upsert user
-    const doc = await User.findOneAndUpdate(
-      { pi_uid: uid },
-      { $set: { username } },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
+    // Ensure we only use pi_uid as unique identifier
+    let doc = await User.findOne({ pi_uid: uid });
 
-    // Attach remaining days & txs
+    if (!doc) {
+      // New user create
+      doc = await User.create({ pi_uid: uid, username });
+    } else {
+      // Existing user update (username overwrite allowed, no unique constraint)
+      doc.username = username;
+      await doc.save();
+    }
+
+    // Compute premium info
     const remainingDays = computeRemainingDays(doc.premium_expiry);
     const txs = await Tx.find({ pi_uid: uid }).sort({ createdAt: -1 }).limit(100).lean();
 
@@ -89,7 +101,7 @@ app.post("/auth/verify", async (req, res) => {
       success: true,
       user: {
         uid,
-        username,
+        username: doc.username,
         premium: !!doc.is_premium && remainingDays > 0,
         premium_expiry: doc.premium_expiry,
         remainingDays,
@@ -107,7 +119,6 @@ app.post("/auth/verify", async (req, res) => {
     return res.status(401).json({ success: false, message: "Auth verify failed" });
   }
 });
-
 // Server approval
 app.post("/payments/approve", async (req, res) => {
   try {
